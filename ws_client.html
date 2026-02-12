@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Rust WS Chat Client</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        background: #0f172a;
+        color: #e5e7eb;
+      }
+      header {
+        padding: 12px 16px;
+        background: #020617;
+        border-bottom: 1px solid #1f2937;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      #status {
+        font-size: 12px;
+      }
+      #status.connected {
+        color: #22c55e;
+      }
+      #status.disconnected {
+        color: #f97316;
+      }
+      main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 0;
+        overflow: hidden;
+      }
+      #log {
+        border-right: 1px solid #1f2937;
+        display: flex;
+        flex-direction: column;
+      }
+      #log-messages {
+        flex: 1;
+        padding: 12px 16px;
+        overflow-y: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .log-line {
+        margin-bottom: 4px;
+      }
+      .log-time {
+        color: #6b7280;
+        margin-right: 4px;
+      }
+      .log-direction-in {
+        color: #22c55e;
+      }
+      .log-direction-out {
+        color: #38bdf8;
+      }
+      .log-system {
+        color: #a855f7;
+      }
+      #controls {
+        padding: 12px 16px;
+        border-top: 1px solid #1f2937;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      input,
+      select,
+      button {
+        font-family: inherit;
+        font-size: 13px;
+      }
+      input,
+      select {
+        background: #020617;
+        border: 1px solid #1f2937;
+        color: #e5e7eb;
+        border-radius: 4px;
+        padding: 6px 8px;
+      }
+      input:focus,
+      select:focus {
+        outline: 1px solid #38bdf8;
+      }
+      button {
+        background: #22c55e;
+        border: none;
+        color: #020617;
+        border-radius: 4px;
+        padding: 6px 10px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      button.secondary {
+        background: #111827;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #right {
+        display: flex;
+        flex-direction: column;
+      }
+      #presets {
+        padding: 12px 16px;
+        border-bottom: 1px solid #1f2937;
+      }
+      #presets h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      #presets button {
+        display: block;
+        width: 100%;
+        margin-bottom: 6px;
+        text-align: left;
+      }
+      #raw-json {
+        flex: 1;
+        padding: 12px 16px;
+        border-top: 1px solid #1f2937;
+        display: flex;
+        flex-direction: column;
+      }
+      #raw-json textarea {
+        flex: 1;
+        resize: none;
+        background: #020617;
+        border: 1px solid #1f2937;
+        color: #e5e7eb;
+        border-radius: 4px;
+        padding: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+      }
+      #raw-json label {
+        font-size: 12px;
+        margin-bottom: 4px;
+        color: #9ca3af;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Rust WebSocket Chat Client</h1>
+      <div id="status" class="disconnected">Disconnected</div>
+    </header>
+    <main>
+      <section id="log">
+        <div id="log-messages"></div>
+        <div id="controls">
+          <select id="event-type">
+            <option value="chat">chat</option>
+            <option value="join">join</option>
+            <option value="leave">leave</option>
+            <option value="custom">custom (raw text)</option>
+          </select>
+          <input id="username" placeholder="username" value="Vivek" />
+          <input id="message" placeholder="message" value="Hello from browser client" />
+          <button id="send-btn" disabled>Send</button>
+          <button id="connect-btn" class="secondary">Connect</button>
+        </div>
+      </section>
+      <section id="right">
+        <div id="presets">
+          <h2>Quick events</h2>
+          <button id="btn-join" class="secondary">Send join</button>
+          <button id="btn-leave" class="secondary">Send leave</button>
+          <button id="btn-chat" class="secondary">Send sample chat</button>
+        </div>
+        <div id="raw-json">
+          <label for="raw-json-text">Raw JSON sent when event type is not "custom"</label>
+          <textarea id="raw-json-text" readonly></textarea>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const WS_URL = "ws://127.0.0.1:7878/ws";
+
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log-messages");
+      const eventTypeEl = document.getElementById("event-type");
+      const usernameEl = document.getElementById("username");
+      const messageEl = document.getElementById("message");
+      const sendBtn = document.getElementById("send-btn");
+      const connectBtn = document.getElementById("connect-btn");
+      const btnJoin = document.getElementById("btn-join");
+      const btnLeave = document.getElementById("btn-leave");
+      const btnChat = document.getElementById("btn-chat");
+      const rawJsonText = document.getElementById("raw-json-text");
+
+      let socket = null;
+
+      function log(kind, direction, text) {
+        const line = document.createElement("div");
+        line.className = "log-line";
+
+        const ts = new Date().toLocaleTimeString();
+        const timeSpan = document.createElement("span");
+        timeSpan.className = "log-time";
+        timeSpan.textContent = `[${ts}]`;
+
+        const dirSpan = document.createElement("span");
+        if (kind === "system") {
+          dirSpan.className = "log-system";
+          dirSpan.textContent = "[system]";
+        } else {
+          dirSpan.className = direction === "in" ? "log-direction-in" : "log-direction-out";
+          dirSpan.textContent = direction === "in" ? "[recv]" : "[send]";
+        }
+
+        const textSpan = document.createElement("span");
+        textSpan.textContent = " " + text;
+
+        line.appendChild(timeSpan);
+        line.appendChild(dirSpan);
+        line.appendChild(textSpan);
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setConnected(connected) {
+        if (connected) {
+          statusEl.textContent = "Connected to " + WS_URL;
+          statusEl.classList.remove("disconnected");
+          statusEl.classList.add("connected");
+          sendBtn.disabled = false;
+          connectBtn.textContent = "Disconnect";
+        } else {
+          statusEl.textContent = "Disconnected";
+          statusEl.classList.remove("connected");
+          statusEl.classList.add("disconnected");
+          sendBtn.disabled = true;
+          connectBtn.textContent = "Connect";
+        }
+      }
+
+      function buildPayload() {
+        const type = eventTypeEl.value;
+        const username = usernameEl.value || "anon";
+        const message = messageEl.value || "";
+
+        if (type === "custom") {
+          rawJsonText.value = "";
+          return message || "hello";
+        }
+
+        const payload = {
+          type,
+          username,
+          message,
+          timestamp: Date.now(),
+        };
+        const json = JSON.stringify(payload);
+        rawJsonText.value = json;
+        return json;
+      }
+
+      function sendCurrent() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          log("system", "out", "Cannot send: socket not connected");
+          return;
+        }
+        const payload = buildPayload();
+        socket.send(payload);
+        log("user", "out", payload);
+      }
+
+      function connect() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+          return;
+        }
+
+        log("system", "in", "Connecting to " + WS_URL + " ...");
+        socket = new WebSocket(WS_URL);
+
+        socket.addEventListener("open", () => {
+          log("system", "in", "WebSocket connected");
+          setConnected(true);
+        });
+
+        socket.addEventListener("message", (event) => {
+          log("user", "in", String(event.data));
+        });
+
+        socket.addEventListener("close", () => {
+          log("system", "in", "WebSocket closed");
+          setConnected(false);
+        });
+
+        socket.addEventListener("error", (err) => {
+          log("system", "in", "WebSocket error: " + err.message);
+        });
+      }
+
+      connectBtn.addEventListener("click", connect);
+      sendBtn.addEventListener("click", sendCurrent);
+
+      messageEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendCurrent();
+        }
+      });
+
+      btnJoin.addEventListener("click", () => {
+        eventTypeEl.value = "join";
+        messageEl.value = "joined the room";
+        sendCurrent();
+      });
+
+      btnLeave.addEventListener("click", () => {
+        eventTypeEl.value = "leave";
+        messageEl.value = "left the room";
+        sendCurrent();
+      });
+
+      btnChat.addEventListener("click", () => {
+        eventTypeEl.value = "chat";
+        messageEl.value = "Hello from preset chat";
+        sendCurrent();
+      });
+
+      // Precompute initial JSON preview
+      buildPayload();
+    </script>
+  </body>
+  </html>
+
