@@ -58,6 +58,25 @@ struct Peer {
 // Key: peer_id, Value: Peer struct
 type Peers = Arc<Mutex<HashMap<String, Peer>>>;
 
+// Helper to send any Envelope with consistent logging
+async fn send_server_message(client: &Client, msg: &Envelope, context: &str) {
+    println!(
+        "[SERVER DEBUG] [{}] Preparing to send Envelope: {:?}",
+        context, msg
+    );
+    let bytes = msg.encode_to_vec();
+    println!(
+        "[SERVER DEBUG] [{}] Encoded Envelope ({} bytes)",
+        context,
+        bytes.len()
+    );
+    let mut sender_lock = client.lock().await;
+    match sender_lock.send(WsMessage::Binary(bytes.into())).await {
+        Ok(_) => println!("[SERVER DEBUG] [{}] ✅ Send OK", context),
+        Err(e) => println!("[SERVER DEBUG] [{}] ❌ Send failed: {}", context, e),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Create shared state for all peers
@@ -131,15 +150,18 @@ async fn handle_socket(socket: WebSocket, peers: Peers, display_name: String, pe
         println!("[SERVER] Total connected peers: {}", peer_count_after_join);
     }
 
-    // Broadcast "peer joined" notification to all OTHER peers (not the new peer)
-    let join_notification = ServerMessage {
-        method: ServerMethod::System as i32,
-        payload: Some(server_message::Payload::Notification(Notification {
-            event: NotificationEvent::PeerJoined as i32,
-            peer_id: peer_id.clone(),
-            display_name: display_name.clone(),
-            message: format!("{} joined", display_name),
-        })),
+    // Broadcast \"peer_joined\" notification to all OTHER peers (not the new peer)
+    let mut join_data = std::collections::HashMap::new();
+    join_data.insert("peerId".to_string(), peer_id.clone());
+    join_data.insert("displayName".to_string(), display_name.clone());
+    join_data.insert("message".to_string(), format!("{} joined", display_name));
+
+    let join_notification = Envelope {
+        event: "notification".to_string(),
+        event_data: Some(EventData {
+            method: "peer_joined".to_string(),
+            data: join_data,
+        }),
     };
 
     {
@@ -147,16 +169,8 @@ async fn handle_socket(socket: WebSocket, peers: Peers, display_name: String, pe
         for (id, peer) in peers_guard.iter() {
             // Skip the newly joined peer - only notify others
             if *id != peer_id {
-                let mut sender_lock = peer.sender.lock().await;
-                let bytes = join_notification.encode_to_vec();
-                match sender_lock.send(WsMessage::Binary(bytes.into())).await {
-                    Ok(_) => {
-                        println!("[SERVER] ✅ Notified peer {} about {} joining", id, display_name);
-                    }
-                    Err(e) => {
-                        println!("[SERVER] ❌ Failed to notify peer {}: {}", id, e);
-                    }
-                }
+                let ctx = format!("join_notification → {}", id);
+                send_server_message(&peer.sender, &join_notification, &ctx).await;
             }
         }
     }
@@ -170,69 +184,66 @@ async fn handle_socket(socket: WebSocket, peers: Peers, display_name: String, pe
 
         match msg {
             WsMessage::Binary(data) => {
-                // Parse protobuf message from client
-                match ClientMessage::decode(data.as_ref()) {
-                    Ok(client_msg) => {
-                        println!("[SERVER DEBUG] Decoded client message - display_name: '{}', payload: {:?}", 
-                            client_msg.display_name, 
-                            client_msg.payload.as_ref().map(|p| format!("{:?}", p))
-                        );
-                        
-                        let mut sender_display_name = display_name.clone();
-                        let message_content: String;
+                println!(
+                    "[SERVER DEBUG] 📥 Raw binary frame from client ({} bytes)",
+                    data.len()
+                );
+                // Parse protobuf envelope from client
+                match Envelope::decode(data.as_ref()) {
+                    Ok(envelope) => {
+                        println!("[SERVER DEBUG] Decoded client Envelope: {:?}", envelope);
 
-                        // Extract display name if provided
-                        if !client_msg.display_name.is_empty() {
-                            sender_display_name = client_msg.display_name.clone();
-                            // Update in peers map
-                            let mut peers_guard = peers.lock().await;
-                            if let Some(peer) = peers_guard.get_mut(&peer_id) {
-                                peer.display_name = sender_display_name.clone();
-                            }
+                        // We only expect \"request\" from client
+                        if envelope.event != "request" {
+                            println!("[SERVER DEBUG] Unexpected event from client: {}", envelope.event);
+                            continue;
                         }
 
-                        // Extract message content based on payload type
-                        message_content = match &client_msg.payload {
-                            Some(client_message::Payload::TextMessage(text)) => {
-                                println!("[SERVER DEBUG] Found TextMessage: '{}'", text);
-                                text.clone()
-                            }
-                            Some(client_message::Payload::BinaryData(bytes)) => {
-                                format!("[Binary data: {} bytes]", bytes.len())
-                            }
-                            Some(client_message::Payload::DataObject(obj)) => {
-                                format!("[Object with {} fields]", obj.fields.len())
-                            }
-                            Some(client_message::Payload::DataArray(arr)) => {
-                                format!("[Array with {} items]", arr.items.len())
-                            }
-                            None => {
-                                println!("[SERVER DEBUG] ⚠️ Payload is None - message might not be encoded correctly");
-                                String::from("[Empty message]")
-                            }
+                        let Some(event_data) = envelope.event_data else {
+                            println!("[SERVER DEBUG] Missing event_data in client envelope");
+                            continue;
                         };
 
-                        println!("Received from {} ({}): {}", sender_display_name, peer_id, message_content);
+                        let method = event_data.method;
+                        let data = event_data.data;
 
-                        // Broadcast message to all OTHER peers (not the sender)
-                        let broadcast_msg = ServerMessage {
-                            method: ServerMethod::Message as i32,
-                            payload: Some(server_message::Payload::PeerMessage(PeerMessage {
-                                message: message_content.clone(),
-                                from_peer_id: peer_id.clone(),
-                                from_display_name: sender_display_name.clone(),
-                                content: Some(peer_message::Content::Text(message_content.clone())),
-                            })),
-                        };
+                        if method == "chat_message" {
+                            let sender_display_name =
+                                data.get("displayName").cloned().unwrap_or_else(|| display_name.clone());
+                            let text = data.get("text").cloned().unwrap_or_default();
 
-                        let peers_guard = peers.lock().await;
-                        let bytes = broadcast_msg.encode_to_vec();
-                        for (id, peer) in peers_guard.iter() {
-                            // Skip the sender
-                            if *id != peer_id {
-                                let mut sender_lock = peer.sender.lock().await;
-                                let _ = sender_lock.send(WsMessage::Binary(bytes.clone().into())).await;
+                            println!(
+                                "Received chat_message from {} ({}): {}",
+                                sender_display_name, peer_id, text
+                            );
+
+                            // Broadcast as notification chat_message to all OTHER peers
+                            let mut out_data = std::collections::HashMap::new();
+                            out_data.insert("fromPeerId".to_string(), peer_id.clone());
+                            out_data.insert("fromDisplayName".to_string(), sender_display_name.clone());
+                            out_data.insert("text".to_string(), text.clone());
+
+                            let broadcast_msg = Envelope {
+                                event: "notification".to_string(),
+                                event_data: Some(EventData {
+                                    method: "chat_message".to_string(),
+                                    data: out_data,
+                                }),
+                            };
+
+                            let peers_guard = peers.lock().await;
+                            for (id, peer) in peers_guard.iter() {
+                                // Skip the sender
+                                if *id != peer_id {
+                                    let ctx = format!("chat_broadcast → {}", id);
+                                    send_server_message(&peer.sender, &broadcast_msg, &ctx).await;
+                                }
                             }
+                        } else {
+                            println!(
+                                "[SERVER DEBUG] Unknown client method '{}', data: {:?}",
+                                method, data
+                            );
                         }
                     }
                     Err(e) => {
@@ -267,21 +278,23 @@ async fn handle_socket(socket: WebSocket, peers: Peers, display_name: String, pe
         peers_guard.remove(&peer_id);
         println!("[SERVER] Peer disconnected: {} ({})", display_name, peer_id);
         
-        // Broadcast "peer left" notification to all remaining peers
-        let leave_notification = ServerMessage {
-            method: ServerMethod::Notification as i32,
-            payload: Some(server_message::Payload::Notification(Notification {
-                event: NotificationEvent::PeerLeft as i32,
-                peer_id: peer_id.clone(),
-                display_name: display_name.clone(),
-                message: format!("{} left", display_name),
-            })),
+        // Broadcast \"peer_left\" notification to all remaining peers
+        let mut leave_data = std::collections::HashMap::new();
+        leave_data.insert("peerId".to_string(), peer_id.clone());
+        leave_data.insert("displayName".to_string(), display_name.clone());
+        leave_data.insert("message".to_string(), format!("{} left", display_name));
+
+        let leave_notification = Envelope {
+            event: "notification".to_string(),
+            event_data: Some(EventData {
+                method: "peer_left".to_string(),
+                data: leave_data,
+            }),
         };
         
-        let bytes = leave_notification.encode_to_vec();
-        for (_id, peer) in peers_guard.iter() {
-            let mut sender_lock = peer.sender.lock().await;
-            let _ = sender_lock.send(WsMessage::Binary(bytes.clone().into())).await;
+        for (id, peer) in peers_guard.iter() {
+            let ctx = format!("leave_notification → {}", id);
+            send_server_message(&peer.sender, &leave_notification, &ctx).await;
         }
     }
 

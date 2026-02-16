@@ -2,102 +2,18 @@ syntax = "proto3";
 
 package messages;
 
-// Client to Server message
-message ClientMessage {
-  string display_name = 1;
-  oneof payload {
-    string text_message = 2;
-    bytes binary_data = 3;
-    DataObject data_object = 4;
-    DataArray data_array = 5;
-  }
+// Generic envelope used for all traffic in both directions
+// - event: "request" from client, "notification" from server
+// - event_data.method: string describing what this is ("chat_message", "peer_joined", etc.)
+// - event_data.data: arbitrary key/value pairs as strings
+message EventData {
+  string method = 1;
+  map<string, string> data = 2;
 }
 
-// Server to Client message
-message ServerMessage {
-  ServerMethod method = 1;
-  oneof payload {
-    SystemMessage system = 2;
-    PeerMessage peer_message = 3;
-    Notification notification = 4;
-  }
+message Envelope {
+  string event = 1;       // "request" | "notification"
+  EventData event_data = 2;
 }
 
-// Server method types
-enum ServerMethod {
-  SYSTEM = 0;
-  MESSAGE = 1;
-  NOTIFICATION = 2;
-}
-
-// System message (connection status, etc.)
-message SystemMessage {
-  string message = 1;
-  string peer_id = 2;
-  string display_name = 3;
-  ConnectionStatus status = 4;
-}
-
-enum ConnectionStatus {
-  CONNECTED = 0;
-  DISCONNECTED = 1;
-  ERROR = 2;
-}
-
-// Peer message (chat messages from other peers)
-message PeerMessage {
-  string message = 1;
-  string from_peer_id = 2;
-  string from_display_name = 3;
-  oneof content {
-    string text = 4;
-    DataObject object = 5;
-    DataArray array = 6;
-    NumberValue number = 7;
-  }
-}
-
-// Notification (peer joined/left)
-message Notification {
-  NotificationEvent event = 1;
-  string peer_id = 2;
-  string display_name = 3;
-  string message = 4;
-}
-
-enum NotificationEvent {
-  PEER_JOINED = 0;
-  PEER_LEFT = 1;
-}
-
-// Generic data types
-message DataObject {
-  map<string, Value> fields = 1;
-}
-
-message DataArray {
-  repeated Value items = 1;
-}
-
-message NumberValue {
-  oneof value {
-    int32 int32_value = 1;
-    int64 int64_value = 2;
-    float float_value = 3;
-    double double_value = 4;
-  }
-}
-
-message Value {
-  oneof value {
-    string string_value = 1;
-    int32 int32_value = 2;
-    int64 int64_value = 3;
-    float float_value = 4;
-    double double_value = 5;
-    bool bool_value = 6;
-    DataObject object_value = 7;
-    DataArray array_value = 8;
-    bytes bytes_value = 9;
-  }
-}
+// (Older generic data types removed for simplicity in this architecture)
